@@ -127,6 +127,6 @@ This will do as it says - run a `systemctl enable wg-quick@<interface>` command 
 - Create a node.ini file for the new node (see above)
 - Run the `./wg-mesh -m mymesh` command.
 - Save the new node.ini file: `mv etc-wireguard/*.ini conf/`
-- Install the new node wireguard configuration file and all the modidifed files for the other systems: `./do-install-files mymesh`
+- Install the new node wireguard configuration file and all the modidifed files for the other systems: `./do-install-files mymesh`.  Again - save_file will complain about it's argument on this first run. Ignore it.
 - Inform wireguard of the new configuarion: `./do-addconf mymesh`
 - Test
