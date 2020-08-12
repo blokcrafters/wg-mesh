@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import configparser
+import argparse
+import ipaddress
+import subprocess
+import tempfile
+
+nodeConfigParsers = {}
+mainConfigParser = {}
+mainDefaults = None
+wg4AddrsInUse = []
+wg6AddrsInUse = []
+
+
+def verify_node_config(node):
+  # Verify the default config settings
+  #  Return messages for the settings that are wrong
+  msgs = []
+#  print(f"Verify node config for '{node}'")
+  nodeConfigParsers[node] = configparser.ConfigParser()
+  ncfg = nodeConfigParsers[node]
+  iniFilename = f"conf/{node}.ini"
+  try:
+    with open(iniFilename) as iniFile:
+      ncfg.read_file(iniFile)
+      
+      # The one and only section name must match the node name.
+      if len(ncfg.sections()) > 1:
+        msgs.append(f"node INI file '{iniFilename}': Has too many sections (there can be only one).")
+      if not node in ncfg.sections():
+        msgs.append(f"node INI file '{iniFilename}': The one and only section name must match the node name.")
+      if len(ncfg.defaults()) > 0:
+        msgs.append(f"node INI file '{iniFilename}': And not be called DEFAULT.")
+
+      # It must have inet4address or inet6address or both.
+      if not ncfg.has_option(node, 'inet4address') and not ncfg.has_option(node, 'inet6address'):
+        msgs.append(f"node INI file '{iniFilename}': Must have at least an inet4address or inet6address setting.")
+
+      # The values must be valid.
+      if ncfg.has_option(node, 'inet4address'):
+        v4addr = ncfg.get(node, 'inet4address').strip()
+        try:
+          ipv4address = ipaddress.IPv4Address(v4addr)
+        except ipaddress.AddressValueError as ave:
+          msgs.append(f"node INI file '{iniFilename}': inet4address must be a valid IPv4 address.")
+          msgs.append(f"node INI file '{iniFilename}':   {ave}")
+      if ncfg.has_option(node, 'inet6address'):
+        v6addr = ncfg.get(node, 'inet6address').strip()
+        try:
+          ipv6address = ipaddress.IPv6Address(v6addr)
+        except ipaddress.AddressValueError as ave:
+          msgs.append(f"node INI file '{iniFilename}': inet6address must be a valid IPv6 address.")
+          msgs.append(f"node INI file '{iniFilename}':   {ave}")
+
+      # when listenport is present, it must be an integer value 1024 <= port <= 65535
+      if ncfg.has_option(node, 'listenport'):
+        try:
+          lport = int(ncfg.get(node, 'listenport').strip())
+          if lport < 1024 or lport > 65535:
+            msgs.append(f"node INI file '{iniFilename}': listenport must be a valid integer IN the range 1024 <= i <= 65535.")
+        except ValueError:
+          msgs.append(f"node INI file '{iniFilename}': listenport must be a valid integer in the range 1024 <= i <= 65535.")
+
+      # When wg4address or wg6address are present they must be valid private addresses on the network.
+      if ncfg.has_option(node, 'wg4address'):
+        wg4addr = ncfg.get(node, 'wg4address').strip()
+        try:
+          wg4address = ipaddress.IPv4Address(wg4addr)
+          if not wg4address.is_private:
+            msgs.append(f"node INI file '{iniFilename}': wg4address must be a valid Private IPv4 address.")
+          else:
+            wg4AddrsInUse.append(wg4address)
+        except ipaddress.AddressValueError as ave:
+          msgs.append(f"node INI file '{iniFilename}': wg4address must be a valid Private IPv4 address.")
+          msgs.append(f"node INI file '{iniFilename}':   {ave}")
+      if ncfg.has_option(node, 'wg6address'):
+        wg6addr = ncfg.get(node, 'wg6address').strip()
+        try:
+          wg6address = ipaddress.IPv6Address(wg6addr)
+          if not wg6address.is_private:
+            msgs.append(f"node INI file '{iniFilename}': wg6address must be a valid Private IPv6 address.")
+          else:
+            wg6AddrsInUse.append(wg6address)
+        except ipaddress.AddressValueError as ave:
+          msgs.append(f"node INI file '{iniFilename}': wg6address must be a valid Private IPv6 address.")
+          msgs.append(f"node INI file '{iniFilename}':   {ave}")
+
+  except FileNotFoundError:
+    msgs.append(f"The node INI file '{iniFilename}' does not exist.")
+
+  return msgs
+
+
+def verify_default_config():
+  # Verify the default config settings
+  #  Return messages for the settings that are wrong
+  msgs = []
+  # Verify that there is only a DEFAULT section.
+  if len(config.sections()) > 0 or len(config.defaults()) == 0:
+    msgs.append("The default and only section must be called '[DEFAULT]'.")
+
+  defaults = config.defaults()
+
+  # There must be a name option.
+  if not 'interface' in defaults:
+    msgs.append(f"An interface setting is required.")
+
+  # A preferredendpoints setting must be ipv4 or ipv6
+  if 'preferredendpoints' in defaults:
+    pep = defaults['preferredendpoints'].strip()
+    if not pep in ('ipv4', 'ipv6'):
+      msgs.append(f"The allowable values for preferredendpoints are either 'ipv4' or 'ipv6'")
+
+  # when listenport is present, it must be an integer value 1024 <= port <= 65535
+  if 'listenport' in defaults:
+    try:
+      lport = int(defaults['listenport'].strip())
+      if lport < 1024 or lport > 65535:
+        msgs.append(f"listenport must be a valid integer IN the range 1024 <= i <= 65535.")
+    except ValueError:
+      msgs.append(f"listenport must be a valid integer in the range 1024 <= i <= 65535.")
+
+  # When network4 or network6 are present they must be a valid private network.
+  network4 = None
+  network6 = None
+  if 'network4' in defaults:
+    net4 = defaults['network4'].strip()
+    try:
+      network4 = ipaddress.IPv4Network(net4)
+      if not network4.is_private:
+        msgs.append(f"network4 must be a valid Private IPv4 network.")
+    except ipaddress.AddressValueError as ave:
+      msgs.append(f"network4 must be a valid Private IPv4 network.")
+      msgs.append(f"  {ave}")
+  if 'network6' in defaults:
+    net6 = defaults['network6'].strip()
+    try:
+      network6 = ipaddress.IPv6Network(net6)
+      if not network6.is_private:
+        msgs.append(f"network6 must be a valid Private IPv6 network.")
+    except ipaddress.AddressValueError as ave:
+      msgs.append(f"network6 must be a valid Private IPv6 network.")
+      msgs.append(f"  {ave}")
+
+  # When startaddress4 or startaddress6 are present they must be a valid private address on the network.
+  if 'startaddress4' in defaults:
+    sa4 = defaults['startaddress4'].strip()
+    if not 'network4' in defaults:
+      msgs.append(f"The presence of startaddress4 requires a network4 setting.")
+    try:
+      startaddress4 = ipaddress.IPv4Address(sa4)
+      if not startaddress4.is_private:
+        msgs.append(f"startaddress4 must be a valid Private IPv4 address.")
+      if network4 and not startaddress4 in network4:
+        msgs.append(f"startaddress4 must be a valid Private IPv4 address within network4.")
+    except ipaddress.AddressValueError as ave:
+      msgs.append(f"startaddress4 must be a valid Private IPv4 address.")
+      msgs.append(f"  {ave}")
+  if 'startaddress6' in defaults:
+    sa6 = defaults['startaddress6'].strip()
+    if not 'network6' in defaults:
+      msgs.append(f"The presence of startaddress6 requires a network6 setting.")
+    try:
+      startaddress6 = ipaddress.IPv6Address(sa6)
+      if not startaddress6.is_private:
+        msgs.append(f"startaddress6 must be a valid Private IPv6 address.")
+      if network6 and not startaddress6 in network6:
+        msgs.append(f"startaddress6 must be a valid Private IPv6 address within network6.")
+    except ipaddress.AddressValueError as ave:
+      msgs.append(f"startaddress6 must be a valid Private IPv6 address.")
+      msgs.append(f"  {ave}")
+
+  # It must have a nodes setting.
+  if not 'nodes' in defaults:
+    msgs.append("The DEFAULT section must have a nodes setting.")
+  else:
+    # All the nodes must have an INI file
+    nodes = defaults['nodes']
+    for node in nodes.split(','):
+      if len(node.strip()):
+        node_msgs = verify_node_config(node.strip())
+        if len(node_msgs):
+          for node_msg in node_msgs:
+            msgs.append(node_msg)
+      else:
+        msgs.append("The nodes setting has an empty node name in it.")
+
+  return msgs
+
+
+def nodeConfigUpdate(node, key, value):
+  ncfg = nodeConfigParsers[node]
+  oldvalue = ncfg.get(node, key, fallback=None)
+  if value != oldvalue:
+    ncfg.set(node, key, value)
+    ncfg.set(node, 'modified', 'true')
+
+
+def addNodeToMesh(node):
+  # Try to add this node to the mesh, return error messages if we can't.
+  msgs = []
+  ncfg = nodeConfigParsers[node]
+
+  # If the node does not have both a public and private key then create them.
+  # Also verify that the private key matches the public key.
+  newPrivateKey = False
+  private = ncfg.get(node, 'private', fallback=None)
+  if not private:
+    info = subprocess.run(['wg', 'genkey'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if info.returncode != 0:
+      msgs.append(f"Tried to generate a wireguard private key with the command 'wg genkey' which failed with output:")
+      msgs.append(f"  {info.stdout.decode('utf-8').rstrip()}")
+    else:
+      private = info.stdout.decode('utf-8').rstrip()
+      newPrivateKey = True
+      nodeConfigUpdate(node, 'private', private)
+
+  if not private:
+    return msgs
+
+  newPublicKey = False
+  public = ncfg.get(node, 'public', fallback=None)
+  # Get a public key from the private key - for verification or to get a new public key
+  info = subprocess.Popen(['wg', 'pubkey'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+  wgStdout, wgStderr = info.communicate(bytearray(private, 'utf-8'), 5)
+  if info.returncode != 0:
+    msgs.append(f"Tried to generate a wireguard public key with the command 'wg pubkey' which failed with output:")
+    msgs.append(f"  {wgStdout.decode('utf-8').rstrip()}")
+    msgs.append(f"  {wgStderr.decode('utf-8').rstrip()}")
+  else:
+    newKey = wgStdout.decode('utf-8').rstrip()
+    if public:
+      # Verify that the new key matches public.
+      if public != newKey:
+        msgs.append(f"{node}: The public key does not match the private key")
+    else:
+      newPublicKey = True
+      public = newKey
+      nodeConfigUpdate(node, 'public', public)
+
+  # If the node has an ipv4 address then we want to make sure it has a wg4address too
+  inet4address = ncfg.get(node, 'inet4address', fallback=None)
+  if inet4address:
+    wg4address = ncfg.get(node, 'wg4address', fallback=None)
+    # If we have a wg4address then it must be in network4.
+    if wg4address:
+      wg4addr = ipaddress.IPv4Address(wg4address)
+      if 'network4' in mainDefaults:
+        net4 = ipaddress.IPv4Network(mainDefaults['network4'])
+        if not wg4addr in net4:
+          msgs.append(f"{node}: the wg4address {wg4address} is not in the default network4 {mainDefaults['network4']}")
+      else:
+        msgs.append(f"{node}: has an inet4address and network4 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a network4 to the main INI file to use wireguard on IPv4.")
+    else:
+      # Get a new wg4address and add it to the node.
+      if not 'network4' in mainDefaults:
+        msgs.append(f"{node}: has an inet4address without a wg4address and network4 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a network4 to the main INI file to use wireguard on IPv4.")
+      # Starting at startaddress4 get an unused wg4address for this node
+      if not 'startaddress4' in mainDefaults:
+        msgs.append(f"{node}: has an inet4address without a wg4address and startaddress4 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a startaddress4 to the main INI file to use wireguard on IPv4.")
+      foundOpenAddress = False
+      try4Address = ipaddress.IPv4Address(mainDefaults['startaddress4'])
+      while not foundOpenAddress:
+        if try4Address in wg4AddrsInUse:
+          try4Address = try4Address + 1
+        else:
+          # Use this one.
+          # print(f"{node} will use wg4address '{str(try4Address)}")
+          foundOpenAddress = True
+          wg4AddrsInUse.append(try4Address)
+          nodeConfigUpdate(node, 'wg4address', str(try4Address))
+
+  # If the node has an ipv6 address then we want to make sure it has a wg6address too
+  inet6address = ncfg.get(node, 'inet6address', fallback=None)
+  if inet6address:
+    wg6address = ncfg.get(node, 'wg6address', fallback=None)
+    # If we have a wg6address then it must be in network6.
+    if wg6address:
+      wg6addr = ipaddress.IPv6Address(wg6address)
+      if 'network6' in mainDefaults:
+        net6 = ipaddress.IPv6Network(mainDefaults['network6'])
+        if not wg6addr in net6:
+          msgs.append(f"{node}: the wg6address {wg6address} is not in the default network6 {mainDefaults['network6']}")
+      else:
+        msgs.append(f"{node}: has an inet6address and network6 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a network6 to the main INI file to use wireguard on IPv6.")
+    else:
+      # Get a new wg6address and add it to the node.
+      if not 'network6' in mainDefaults:
+        msgs.append(f"{node}: has an inet6address without a wg6address and network6 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a network6 to the main INI file to use wireguard on IPv6.")
+      # Starting at startaddress6 get an unused wg6address for this node
+      if not 'startaddress6' in mainDefaults:
+        msgs.append(f"{node}: has an inet6address without a wg6address and startaddress6 is missing from the main INI file.")
+        msgs.append(f"{node}:   please add a startaddress6 to the main INI file to use wireguard on IPv6.")
+      foundOpenAddress = False
+      try6Address = ipaddress.IPv6Address(mainDefaults['startaddress6'])
+      while not foundOpenAddress:
+        if try6Address in wg6AddrsInUse:
+          try6Address = try6Address + 1
+        else:
+          # Use this one.
+          # print(f"{node} will use wg6address '{str(try6Address)}")
+          foundOpenAddress = True
+          wg6AddrsInUse.append(try6Address)
+          nodeConfigUpdate(node, 'wg6address', str(try6Address))
+
+  # If the node has an ipv4 address then we want to make sure it has a port to listen on too
+  # Same for ipv6 address.
+  inet4address = ncfg.get(node, 'inet4address', fallback=None)
+  if inet4address:
+    lport = ncfg.get(node, 'listenport', fallback=None)
+    if not lport:
+      if not 'listenport' in mainDefaults:
+        msgs.append(f"{node} is using IPv4 but does not have a listenport and the DEFAULT section for {wg_name} is missing a setting for listenport also.")
+        msgs.append(f"{node} please add either a listenport setting for {node} or add a default listenport to the DEFAULT section for {wg_name}")
+      else:
+        lport = mainDefaults['listenport']
+        nodeConfigUpdate(node, 'listenport', lport)
+
+  # If the node has an ipv6 address then we want to make sure it has a port to listen on too
+  inet6address = ncfg.get(node, 'inet6address', fallback=None)
+  if inet6address:
+    lport = ncfg.get(node, 'listenport', fallback=None)
+    if not lport:
+      if not 'listenport' in mainDefaults:
+        msgs.append(f"{node} is using IPv6 but does not have a listenport and the DEFAULT section for {wg_name} is missing a setting for listenport also.")
+        msgs.append(f"{node} please add either a listenport setting for {node} or add a default listenport to the DEFAULT section for {wg_name}")
+      else:
+        lport = mainDefaults['listenport']
+        nodeConfigUpdate(node, 'listenport', lport)
+
+  return msgs
+
+
+def genWGFile(dir, node):
+  msgs = []
+  ncfg = nodeConfigParsers[node]
+
+  # Get the preferredendpoints setting
+  pep = 'ipv4'
+  if 'preferredendpoints' in mainDefaults:
+    pep = mainDefaults['preferredendpoints'].strip()
+
+  try:
+    os.mkdir(dir)
+  except FileExistsError:
+    pass
+
+  # write to the configuration file in dir
+  fileName = f"{dir}/{mainDefaults['interface'].strip()}.conf"
+  with open(os.open(fileName, os.O_CREAT | os.O_WRONLY, 0o600), 'w') as fh:
+    # Write the Interface
+    print("[Interface]", file=fh)
+
+    # Address
+    print("Address = ", file=fh, end='')
+    wg4address = ncfg.get(node, 'wg4address', fallback=None)
+    if wg4address:
+      print(f"{wg4address}", file=fh, end='')
+      network4 = ipaddress.IPv4Network(mainDefaults['network4'].strip())
+      print(f"/{network4.prefixlen}", file=fh, end='')
+    wg6address = ncfg.get(node, 'wg6address', fallback=None)
+    if wg6address:
+      if wg4address:
+        print(", ", file=fh, end='')
+      print(f"{wg6address}", file=fh, end='')
+      network6 = ipaddress.IPv6Network(mainDefaults['network6'].strip())
+      print(f"/{network6.prefixlen}", file=fh, end='')
+    print("", file=fh)
+
+    # ListenPort
+    print("ListenPort = ", file=fh, end='')
+    lport = ncfg.get(node, 'listenport', fallback=None)
+    if lport:
+      print(f"{lport}", file=fh)
+
+    # PrivateKey
+    print("PrivateKey = ", file=fh, end='')
+    privkey = ncfg.get(node, 'private', fallback=None)
+    if privkey:
+      print(f"{privkey}", file=fh)
+
+    # Write a Peer for all other nodes
+    for othernode in nodeConfigParsers:
+      if othernode != node:
+        oncfg = nodeConfigParsers[othernode]
+        print("", file=fh)
+        print("[Peer]", file=fh)
+
+        endpointSelected = False
+        # Endpoint
+        print("Endpoint = ", file=fh, end='')
+        inet4address = oncfg.get(othernode, 'inet4address', fallback=None)
+        inet6address = oncfg.get(othernode, 'inet6address', fallback=None)
+        if inet4address and pep == 'ipv4':
+          print(f"{inet4address}", file=fh, end='')
+          lport = oncfg.get(othernode, 'listenport', fallback=None)
+          print(f":{lport}", file=fh, end='')
+          endpointSelected = True
+        if inet6address and pep == 'ipv6':
+          print(f"[{inet6address}]", file=fh, end='')
+          lport = oncfg.get(othernode, 'listenport', fallback=None)
+          print(f":{lport}", file=fh, end='')
+          endpointSelected = True
+        if inet4address and not endpointSelected:
+          print(f"{inet4address}", file=fh, end='')
+          lport = oncfg.get(othernode, 'listenport', fallback=None)
+          print(f":{lport}", file=fh, end='')
+          endpointSelected = True
+        if inet6address and not endpointSelected:
+          print(f"[{inet6address}]", file=fh, end='')
+          lport = oncfg.get(othernode, 'listenport', fallback=None)
+          print(f":{lport}", file=fh, end='')
+          endpointSelected = True
+        print("", file=fh)
+
+        # PublicKey
+        print("PublicKey = ", file=fh, end='')
+        pubkey = oncfg.get(othernode, 'public', fallback=None)
+        if pubkey:
+          print(f"{pubkey}", file=fh, end='')
+        print("", file=fh)
+
+        # AllowedIPs
+        print("AllowedIPs = ", file=fh, end='')
+        wg4address = oncfg.get(othernode, 'wg4address', fallback=None)
+        if wg4address:
+          print(f"{wg4address}/32", file=fh, end='')
+        wg6address = oncfg.get(othernode, 'wg6address', fallback=None)
+        if wg6address:
+          if wg4address:
+            print(", ", file=fh, end='')
+          print(f"{wg6address}/128", file=fh, end='')
+        print("", file=fh)
+
+  return msgs
+
+
+# MAIN
+
+# The program name
+program = os.path.basename(__file__)
+
+# Get our arguments
+parser = argparse.ArgumentParser(prog=program, epilog='''
+The mesh-name argument is used to as part of the name for the initialization file - which will be expected in file:
+conf/wg-<mesh-name>.ini
+''')
+parser.add_argument("-m", "--mesh-name", help="The mesh name of the initialization file to use for input.", required=True)
+args = parser.parse_args()
+
+mesh_name = args.mesh_name
+wg_name = f"wg-{mesh_name}"
+
+
+# Is wireguard installed?
+wgCheck = False
+try:
+  info = subprocess.run(['wg', '--help'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+  if info.returncode == 0:
+    wgCheck = True
+  else:
+    print("The command 'wg --help' failed.")
+except FileNotFoundError:
+  print("The command 'wg' could not be found.")
+  pass
+
+if not wgCheck:
+  print("Wireguard does not seem to be installed. Please verify that it is installed.")
+  sys.exit(1)
+
+# Get our initialization information
+iniFilename = f"conf/wg-{args.mesh_name}.ini"
+config = configparser.ConfigParser()
+try:
+  config.read_file(open(iniFilename))
+except FileNotFoundError:
+  print(f"The initialization file {iniFilename} was not found")
+  sys.exit(1)
+except:
+  print(f"There was an error reading the initialization file {iniFilename}")
+  print("Please check the file.")
+  sys.exit(1)
+
+# Verify the default configuration settings
+msgs = verify_default_config()
+if len(msgs):
+  if len(msgs) == 1:
+    print(f"ERROR: There was a problem with the initialization file {iniFilename}:")
+  else:
+    print(f"ERROR: There were problems with the initialization file {iniFilename}:")
+  for msg in msgs:
+    print(f"  {msg}")
+  sys.exit(1)
+
+mainConfigParser = config
+#with open('node1.txt', 'w') as file:
+#  nodeConfigParsers['node1'].write(file)
+
+mainDefaults = mainConfigParser.defaults()
+allNodes = mainDefaults['nodes'].split(',')
+
+# Add all the nodes to the mesh
+for node in allNodes:
+  node = node.strip()
+  add_msgs = addNodeToMesh(node)
+  if len(add_msgs):
+    for add_msg in add_msgs:
+      msgs.append(add_msg)
+
+if len(msgs):
+  if len(msgs) == 1:
+    print(f"ERROR: There was a problem with adding the nodes to the mesh:")
+  else:
+    print(f"ERROR: There were problems with adding the nodes to the mesh:")
+  for msg in msgs:
+    print(f"  {msg}")
+  sys.exit(1)
+
+# All nodes are now in the mesh.
+# Either previously or added.
+# Generate the wireguard config files.
+
+for node in allNodes:
+  node = node.strip()
+  ncfg = nodeConfigParsers[node]
+  if ncfg.getboolean(node, 'modified', fallback=False):
+    print(f"node {node} was modified - it needs to be rewritten")
+    ncfg.remove_option(node, 'modified')
+    fileName = f"etc-wireguard/{node}.ini"
+    with open(os.open(fileName, os.O_CREAT | os.O_WRONLY, 0o600), 'w') as fh:
+      ncfg.write(fh)
+  else:
+    print(f"node {node} was NOT modified")
+
+for node in allNodes:
+  node = node.strip()
+  try:
+    os.mkdir("etc-wireguard")
+  except FileExistsError:
+    pass
+  add_msgs = genWGFile(f"etc-wireguard/{node}", node)
+  if len(add_msgs):
+    for add_msg in add_msgs:
+      msgs.append(add_msg)
+
+if len(msgs):
+  print(f"Errors. NOT Ok to move directory")
+  if len(msgs) == 1:
+    print(f"ERROR: There was a problem:")
+  else:
+    print(f"ERROR: There were problems:")
+  for msg in msgs:
+    print(f"  {msg}")
+  sys.exit(1)
+
+sys.exit(0)

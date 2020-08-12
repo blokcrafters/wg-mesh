@@ -1,0 +1,47 @@
+#!/bin/bash
+
+trim() {
+  local var="$*"
+  # remove leading whitespace characters
+  var="${var#"${var%%[![:space:]]*}"}"
+  # remove trailing whitespace characters
+  var="${var%"${var##*[![:space:]]}"}"
+  printf '%s' "$var"
+}
+
+mesh="$1"
+if [ -z "${mesh}" ]; then
+  printf 'A mesh name argument is expected as the first and only argument\n'
+  exit 1
+fi
+if [ -n "$2" ]; then
+  printf 'A mesh name argument is expected as the first and only argument\n'
+  exit 1
+fi
+
+config_name="conf/wg-${mesh}.ini"
+if [ ! -f "${config_name}" ]; then
+  printf "The configuration file \'${config_name}\' could not be found.\n"
+  exit 1
+fi
+
+iface=$(grep '^interface.*=' "${config_name}" | sed -e 's/^interface.*=//' -e 's/,/ /g')
+iface=$(trim $iface)
+if [ -z "$iface" ]; then
+  printf "Could not find an interface name in \'${config_name}\'\n"
+  exit 1
+fi
+
+nodes=$(grep '^nodes.*=' "${config_name}" | sed -e 's/^node.*=//' -e 's/,/ /g')
+for node in $nodes; do
+  node=$(trim $node)
+  inet6=$(grep '^inet6address.*=' "conf/$node.ini" | sed -e 's/^inet6address.*=//')
+  inet6=$(trim $inet6)
+  if [ -n "$inet6" ]; then
+    printf "$inet6 "
+  fi
+done
+
+printf "\n"
+
+exit 0

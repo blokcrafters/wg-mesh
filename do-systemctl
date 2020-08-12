@@ -1,0 +1,69 @@
+#!/bin/bash
+
+dousage=false
+mesh="$1"
+sc_cmd="$2"
+if [ -z "${mesh}" ]; then
+  dousage=true
+fi
+if [ "$sc_cmd" != "enable" -a "$sc_cmd" != "disable" -a "$sc_cmd" != "start" -a "$sc_cmd" != "stop" -a "$sc_cmd" != "status" ] ; then
+  dousage=true
+fi
+
+if ${dousage}; then
+  printf "Usage:\n"
+  printf "do-systemctl <mesh-name> <command>\n"
+  printf "\n"
+  printf "The mesh-name and command arguments are required.\n"
+  printf "The commands supported for systemctl are: enable, disable, start, stop, status\n"
+  printf "Please choose one of them.\n"
+  exit 1
+fi
+
+trim() {
+  local var="$*"
+  # remove leading whitespace characters
+  var="${var#"${var%%[![:space:]]*}"}"
+  # remove trailing whitespace characters
+  var="${var%"${var##*[![:space:]]}"}"
+  printf '%s' "$var"
+}
+
+config_name="conf/wg-${mesh}.ini"
+if [ ! -f "${config_name}" ]; then
+  printf "The configuration file \'${config_name}\' could not be found.\n"
+  printf "Please check your mesh-name.\n"
+  exit 1
+fi
+
+iface=$(grep '^interface.*=' "${config_name}" | sed -e 's/^interface.*=//' -e 's/,/ /g')
+iface=$(trim $iface)
+if [ -z "$iface" ]; then
+  printf "Could not find an interface name in \'${config_name}\'\n"
+  exit 1
+fi
+
+nodes=$(grep '^nodes.*=' "${config_name}" | sed -e 's/^node.*=//' -e 's/,/ /g')
+for node in $nodes; do
+  node=$(trim $node)
+  echo "$node - "
+  inet4=$(grep '^inet4address.*=' "conf/$node.ini" | sed -e 's/^inet4address.*=//')
+  inet4=$(trim $inet4)
+  if [ -n "$inet4" ]; then
+    set -x
+    ssh "root@$inet4" systemctl "${sc_cmd}" "wg-quick@$iface"
+    set +x
+  else
+    inet6=$(grep '^inet6address.*=' "conf/$node.ini" | sed -e 's/^inet6address.*=//')
+    inet6=$(trim $inet6)
+    if [ -n "$inet6" ]; then
+      set -x
+      ssh "root@$inet6" systemctl "${sc_cmd}" "wg-quick@$iface"
+      set +x
+    else
+      printf 'Could not find a network address for node %s\n' "$node"
+    fi
+  fi
+done
+
+exit 0
