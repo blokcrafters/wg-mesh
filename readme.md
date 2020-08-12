@@ -98,6 +98,9 @@ This will do several things for each of the nodes in the mesh network:
 
 It will first look for an IPv4 address (inet4address) for the node and use that to work with.
 If one is not present in the node configuration file it will try the IPv6 address (inet6address).
+If this is the first time you install the files, save_file will complain that it requires a filename
+as the first and only argument.
+This complain can be safely ignored for the first run of do-install-files.
 
 ##### Tell wireguard about the new configuration
 Then run the do-addconf script `./do-addconf mymesh`<br>
